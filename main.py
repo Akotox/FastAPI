@@ -1,27 +1,75 @@
-from fastapi import FastAPI
+from typing import List
+import boto3
+from loguru import logger
+from uuid import uuid4
+import magic
+from fastapi import FastAPI, HTTPException, UploadFile, status
 from pydantic import BaseModel
 
-app = FastAPI()
 
-class Msg(BaseModel):
-    msg: str
+KB = 1024
+MB = 1024 * KB
+
+SUPPORTED_FILE_TYPES = {
+    'image/png': 'png',
+    'image/jpeg': 'jpg',
+    'application/pdf': 'pdf'
+}
+
+AWS_BUCKET = 'my-go-micro-bucket'
+
+s3 = boto3.resource('s3')
+bucket = s3.Bucket(AWS_BUCKET)
+
+
+async def s3_upload(contents: bytes, key: str):
+    logger.info(f'Uploading {key} to s3')
+    bucket.put_object(Key=f'images/{key}', Body=contents)
+
+
+app = FastAPI()
+# handler = Mangum(app)
 
 
 @app.get("/")
-async def root():
-    return {"message": "Hello World. Welcome to FastAPI!"}
+async def home():
+    return {'message': 'Hello file upload'}
 
 
-@app.get("/path")
-async def demo_get():
-    return {"message": "This is /path endpoint, use a post request to transform the text to uppercase"}
+@app.post('/upload')
+async def upload(files: List[UploadFile] = None):
+    if not files:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail='No files found'
+        )
 
+    if len(files) > 5:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail='Max 5 files can be uploaded at once'
+        )
 
-@app.post("/path")
-async def demo_post(inp: Msg):
-    return {"message": inp.msg.upper()}
+    file_names = []
+    for file in files:
+        contents = await file.read()
+        size = len(contents)
 
+        if not 0 < size <= 1 * MB:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Supported file size is 0-1 MB"
+            )
 
-@app.get("/path/{path_id}")
-async def demo_get_path_id(path_id: int):
-    return {"message": f"This is /path/{path_id} endpoint, use post request to retrieve result"}
+        file_type = magic.from_buffer(buffer=contents, mime=True)
+        if file_type not in SUPPORTED_FILE_TYPES:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f'Unsupported file type: {file_type}.'
+            )
+        file_name = f'{uuid4()}.{SUPPORTED_FILE_TYPES[file_type]}'
+        await s3_upload(contents=contents, key=file_name)
+
+        file_names.append(file_name)
+
+    return {'file_names': file_names}
